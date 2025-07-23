@@ -4,7 +4,7 @@ param(
     [string]$ServiceName = "WhisperTranscriber",
     [string]$DisplayName = "Whisper Auto-Transcriber",
     [string]$ScriptPath = "C:\whisper\whisper-service.ps1",
-    [string]$NSSMPath = "C:\nssm\nssm.exe"
+    [string]$NSSMPath = "C:\whisper\nssm"
 )
 
 # Administrator privilege check
@@ -30,6 +30,7 @@ Ensure-Directory "C:\whisper"
 Ensure-Directory "C:\whisper\transcripts"
 Ensure-Directory "C:\whisper\completed"
 Ensure-Directory "C:\whisper\logs"
+Ensure-Directory "C:\whisper\service"
 
 # Directory structure creation
 $WatchPath = "C:\whisper\watch"
@@ -172,6 +173,7 @@ Write-Host "Copied whisper-service.ps1 to $destScript" -ForegroundColor Green
 $ServiceName = "WhisperTranscriber"
 $DisplayName = "Whisper Auto-Transcriber Service"
 $Description = "Automated audio transcription service using OpenAI Whisper CLI. Monitors a directory and transcribes new audio files."
+$ServiceDir = "C:\whisper\service"
 $AppDirectory = $ServiceDir
 $AppParameters = "-ExecutionPolicy Bypass -File `"$destScript`""
 
