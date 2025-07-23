@@ -178,12 +178,36 @@ $AppDirectory = $ServiceDir
 $AppParameters = "-ExecutionPolicy Bypass -File `"$destScript`""
 
 try {
-    & "$NSSMExePath" remove $ServiceName confirm | Out-Null  # Remove existing service if present
+    # First, try to stop and remove any existing service
+    Write-Host "Checking for existing service..." -ForegroundColor Cyan
+    try {
+        $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($existingService) {
+            Write-Host "Stopping existing service..." -ForegroundColor Yellow
+            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        }
+    } catch {
+        # Service doesn't exist, which is fine
+    }
+    
+    # Remove service using NSSM
+    Write-Host "Removing existing service configuration..." -ForegroundColor Yellow
+    & "$NSSMExePath" remove $ServiceName confirm | Out-Null
+    Start-Sleep -Seconds 3  # Wait for removal to complete
+    
+    # Install new service
+    Write-Host "Installing new service..." -ForegroundColor Yellow
     & "$NSSMExePath" install $ServiceName powershell.exe $AppParameters | Out-Null
+    Start-Sleep -Seconds 1
+    
+    # Configure service settings
+    Write-Host "Configuring service settings..." -ForegroundColor Yellow
     & "$NSSMExePath" set $ServiceName AppDirectory $AppDirectory | Out-Null
     & "$NSSMExePath" set $ServiceName DisplayName "$DisplayName" | Out-Null
     & "$NSSMExePath" set $ServiceName Description "$Description" | Out-Null
     & "$NSSMExePath" set $ServiceName Start SERVICE_AUTO_START | Out-Null
+    
     Write-Host "NSSM service '$ServiceName' installed and configured successfully." -ForegroundColor Green
 } catch {
     Write-Host "ERROR: Failed to configure NSSM service: $($_.Exception.Message)" -ForegroundColor Red
