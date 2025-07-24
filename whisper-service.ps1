@@ -1,23 +1,36 @@
 # whisper-service.ps1
-
+# Whisper Auto-Transcriber Windows Service
+# 
+# Supported Audio Formats:
+# - M4A (AAC)
+# - MP3
+# - WAV
+# - FLAC
+# - AAC
+# - OGG
+# - WMA
+# - M4B (Audiobook)
+# - WebM
+#
 # =============================
 # Configuration Parameters
 # =============================
-[string]$WatchPath     = "C:\whisper"
+[string]$WatchPath     = "C:\whisper\watch"
 [string]$OutputPath    = "C:\whisper\transcripts"
 [string]$CompletedPath = "C:\whisper\completed"
+[string]$FailedPath    = "C:\whisper\failed"
 [string]$LogPath       = "C:\whisper\logs"
 [string]$Language      = "en"
 [int]$CheckInterval    = 5  # seconds
 
 # --- Enhancement: Add $FailedPath global variable for failed files ---
-$global:FailedPath = Join-Path $OutputPath 'failed'
 if (-not (Test-Path $CompletedPath)) {
     $global:CompletedPath = Join-Path $OutputPath 'completed'
-    Ensure-Directory $global:CompletedPath
+    New-Item -ItemType Directory -Path $global:CompletedPath -Force | Out-Null
 }
-if (-not (Test-Path $global:FailedPath)) {
-    Ensure-Directory $global:FailedPath
+if (-not (Test-Path $FailedPath)) {
+    $global:FailedPath = Join-Path $OutputPath 'failed'
+    New-Item -ItemType Directory -Path $global:FailedPath -Force | Out-Null
 }
 
 # =============================
@@ -25,8 +38,8 @@ if (-not (Test-Path $global:FailedPath)) {
 # =============================
 function Test-Directory {
     param([string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        Write-Error "Path parameter cannot be null or empty"
+    if ([string]::IsNullOrEmpty($Path)) {
+        Write-Error "Path parameter is null or empty"
         exit 1
     }
     if (-not (Test-Path $Path)) {
@@ -430,29 +443,21 @@ function Start-QueueProcessor {
         return
     }
     
+    # Start queue processor as a background job that runs in the main process
     $global:QueueProcessorJob = Start-Job -ScriptBlock {
-        param($LogPath, $CheckInterval, $OutputPath, $Language, $Queue, $QueueLock)
+        param($LogPath, $CheckInterval, $OutputPath, $Language, $CompletedPath, $FailedPath)
         
-        Import-Module Microsoft.PowerShell.Utility
-        
-        function Write-Log { param($Message, $Level) Write-Host "[$Level] $Message" }
-        function Write-ErrorLog { param($Message, $Category) Write-Host "[ERROR][$Category] $Message" }
-        
-        function Dequeue-File {
-            param($Queue, $QueueLock)
-            [System.Threading.Monitor]::Enter($QueueLock)
+        function Write-Log { 
+            param($Message, $Level = "INFO") 
+            $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            $logLine = "[$timestamp] [$Level] $Message"
+            $logFile = Join-Path $LogPath ("whisper-service-" + (Get-Date -Format 'yyyyMMdd') + ".log")
             try {
-                if ($Queue.Count -gt 0) {
-                    return $Queue.Dequeue()
-                } else {
-                    return $null
-                }
+                Add-Content -Path $logFile -Value $logLine -ErrorAction SilentlyContinue
             } catch {
-                Write-Log "Error during dequeue operation: $($_.Exception.Message)" "ERROR"
-                return $null
-            } finally {
-                [System.Threading.Monitor]::Exit($QueueLock)
+                Write-Host $logLine
             }
+            Write-Host $logLine
         }
         
         function Process-AudioFile {
@@ -466,6 +471,8 @@ function Start-QueueProcessor {
             $baseName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
             $outputFile = Join-Path $OutputPath ("$baseName.txt")
             
+            Write-Log "Starting transcription for: $FilePath" "INFO"
+            
             $whisperArgs = @(
                 "--model", "medium",
                 "--language", $Language,
@@ -475,44 +482,60 @@ function Start-QueueProcessor {
             )
             
             try {
-                $process = Start-Process -FilePath "whisper" -ArgumentList $whisperArgs -Wait -PassThru -NoNewWindow
+                $whisperPath = "C:\Users\Daniel\AppData\Local\Programs\Python\Python310\Scripts\whisper.exe"
+                Write-Log "Running whisper command: $whisperPath $($whisperArgs -join ' ')" "INFO"
+                $process = Start-Process -FilePath $whisperPath -ArgumentList $whisperArgs -Wait -PassThru -NoNewWindow
                 
                 if ($process.ExitCode -eq 0) {
                     Write-Log "Successfully processed: $FilePath" "INFO"
                     
                     # Move processed file to completed directory
-                    $completedDir = Join-Path $OutputPath "completed"
-                    if (-not (Test-Path $completedDir)) {
-                        New-Item -ItemType Directory -Path $completedDir -Force | Out-Null
+                    if (-not (Test-Path $CompletedPath)) {
+                        New-Item -ItemType Directory -Path $CompletedPath -Force | Out-Null
                     }
-                    Move-Item -Path $FilePath -Destination (Join-Path $completedDir ([System.IO.Path]::GetFileName($FilePath))) -Force
+                    Move-Item -Path $FilePath -Destination (Join-Path $CompletedPath ([System.IO.Path]::GetFileName($FilePath))) -Force
                     Write-Log "Moved to completed: $FilePath" "INFO"
                 } else {
-                    Write-ErrorLog "Whisper CLI failed for ${FilePath}" "WhisperCLI"
+                    Write-Log "Whisper CLI failed for ${FilePath} with exit code: $($process.ExitCode)" "ERROR"
+                    # Move failed file to failed directory
+                    if (-not (Test-Path $FailedPath)) {
+                        New-Item -ItemType Directory -Path $FailedPath -Force | Out-Null
+                    }
+                    Move-Item -Path $FilePath -Destination (Join-Path $FailedPath ([System.IO.Path]::GetFileName($FilePath))) -Force
+                    Write-Log "Moved to failed: $FilePath" "ERROR"
                 }
             } catch {
-                Write-ErrorLog "Exception in Process-AudioFile for ${FilePath}: $($_.Exception.Message)" "WhisperCLI"
+                Write-Log "Exception in Process-AudioFile for ${FilePath}: $($_.Exception.Message)" "ERROR"
+                # Move failed file to failed directory
+                if (-not (Test-Path $FailedPath)) {
+                    New-Item -ItemType Directory -Path $FailedPath -Force | Out-Null
+                }
+                Move-Item -Path $FilePath -Destination (Join-Path $FailedPath ([System.IO.Path]::GetFileName($FilePath))) -Force
+                Write-Log "Moved to failed: $FilePath" "ERROR"
             }
         }
         
         Write-Log "Queue processor started" "INFO"
         
+        # Simple file monitoring loop
         while ($true) {
             try {
-                $filePath = Dequeue-File -Queue $Queue -QueueLock $QueueLock
+                # Check for .m4a files in the watch directory
+                $watchDir = Split-Path $OutputPath -Parent | Join-Path -ChildPath "watch"
+                $files = Get-ChildItem -Path $watchDir -Filter "*.m4a" -ErrorAction SilentlyContinue
                 
-                if ($filePath) {
-                    Write-Log "Processing file: $filePath" "INFO"
-                    Process-AudioFile -FilePath $filePath
-                } else {
-                    Start-Sleep -Seconds $CheckInterval
+                foreach ($file in $files) {
+                    Write-Log "Processing file: $($file.FullName)" "INFO"
+                    Process-AudioFile -FilePath $file.FullName
                 }
+                
+                Start-Sleep -Seconds $CheckInterval
             } catch {
                 Write-Log "Error in queue processor: $($_.Exception.Message)" "ERROR"
                 Start-Sleep -Seconds $CheckInterval
             }
         }
-    } -ArgumentList $LogPath, $CheckInterval, $OutputPath, $Language, $global:Queue, $global:QueueLock
+    } -ArgumentList $LogPath, $CheckInterval, $OutputPath, $Language, $CompletedPath, $FailedPath
     
     Write-Log -Message "Queue processor job started." -Level "INFO"
 }
@@ -542,16 +565,15 @@ function Start-FileSystemWatcher {
     
     $global:FileSystemWatcher = New-Object System.IO.FileSystemWatcher
     $global:FileSystemWatcher.Path = $Path
-    $global:FileSystemWatcher.Filter = "*.m4a"
+    $global:FileSystemWatcher.Filter = "*.m4a;*.mp3;*.wav;*.flac;*.aac;*.ogg;*.wma;*.m4b;*.webm"
     $global:FileSystemWatcher.IncludeSubdirectories = $false
     $global:FileSystemWatcher.NotifyFilter = [System.IO.NotifyFilters]::FileName
     
     # Register event handlers
-    $global:FileSystemWatcher.Created += {
-        param($sender, $e)
-        $filePath = $e.FullPath
-        Write-Log -Message "New file detected: $filePath" -Level "INFO"
-        Add-ToQueue -FilePath $filePath
+    Register-ObjectEvent -InputObject $global:FileSystemWatcher -EventName Created -Action {
+        $filePath = $Event.SourceEventArgs.FullPath
+        Write-Log -Message "New audio file detected: $filePath" -Level "INFO"
+        # File will be processed in the main loop
     }
     
     $global:FileSystemWatcher.EnableRaisingEvents = $true
@@ -567,6 +589,64 @@ function Stop-FileSystemWatcher {
         } catch {
             Write-Log -Message "Error stopping FileSystemWatcher: $($_.Exception.Message)" -Level "ERROR"
         }
+    }
+}
+
+# =============================
+# Audio Processing Functions
+# =============================
+function Process-AudioFile {
+    param([string]$FilePath)
+    
+    if (-not (Test-Path $FilePath)) {
+        Write-Log -Message "Audio file does not exist: $FilePath" -Level "ERROR"
+        return
+    }
+    
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
+    $outputFile = Join-Path $OutputPath ("$baseName.txt")
+    
+    Write-Log -Message "Starting transcription for: $FilePath" -Level "INFO"
+    
+    $whisperArgs = @(
+        "--model", "medium",
+        "--language", $Language,
+        "--output_format", "txt",
+        "--output_dir", $OutputPath,
+        $FilePath
+    )
+    
+    try {
+        $whisperPath = "C:\Users\Daniel\AppData\Local\Programs\Python\Python310\Scripts\whisper.exe"
+        Write-Log -Message "Running whisper command: $whisperPath $($whisperArgs -join ' ')" -Level "INFO"
+        $process = Start-Process -FilePath $whisperPath -ArgumentList $whisperArgs -Wait -PassThru -NoNewWindow
+        
+        if ($process.ExitCode -eq 0) {
+            Write-Log -Message "Successfully processed: $FilePath" -Level "INFO"
+            
+            # Move processed file to completed directory
+            if (-not (Test-Path $CompletedPath)) {
+                New-Item -ItemType Directory -Path $CompletedPath -Force | Out-Null
+            }
+            Move-Item -Path $FilePath -Destination (Join-Path $CompletedPath ([System.IO.Path]::GetFileName($FilePath))) -Force
+            Write-Log -Message "Moved to completed: $FilePath" -Level "INFO"
+        } else {
+            Write-Log -Message "Whisper CLI failed for ${FilePath} with exit code: $($process.ExitCode)" -Level "ERROR"
+            # Move failed file to failed directory
+            if (-not (Test-Path $FailedPath)) {
+                New-Item -ItemType Directory -Path $FailedPath -Force | Out-Null
+            }
+            Move-Item -Path $FilePath -Destination (Join-Path $FailedPath ([System.IO.Path]::GetFileName($FilePath))) -Force
+            Write-Log -Message "Moved to failed: $FilePath" -Level "ERROR"
+        }
+    } catch {
+        Write-Log -Message "Exception in Process-AudioFile for ${FilePath}: $($_.Exception.Message)" -Level "ERROR"
+        # Move failed file to failed directory
+        if (-not (Test-Path $FailedPath)) {
+            New-Item -ItemType Directory -Path $FailedPath -Force | Out-Null
+        }
+        Move-Item -Path $FilePath -Destination (Join-Path $FailedPath ([System.IO.Path]::GetFileName($FilePath))) -Force
+        Write-Log -Message "Moved to failed: $FilePath" -Level "ERROR"
     }
 }
 
@@ -638,10 +718,14 @@ function Initialize-StartupFileProcessing {
     )
     
     try {
-        $existingFiles = Get-ChildItem -Path $WatchPath -Filter "*.m4a" -ErrorAction SilentlyContinue
+        $audioExtensions = @("*.m4a", "*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg", "*.wma", "*.m4b", "*.webm")
+        $existingFiles = @()
+        foreach ($ext in $audioExtensions) {
+            $existingFiles += Get-ChildItem -Path $WatchPath -Filter $ext -ErrorAction SilentlyContinue
+        }
         
         if ($existingFiles) {
-            Write-Log -Message "Found $($existingFiles.Count) existing .m4a files at startup. Adding to queue..." -Level "INFO"
+            Write-Log -Message "Found $($existingFiles.Count) existing audio files at startup. Adding to queue..." -Level "INFO"
             
             foreach ($file in $existingFiles) {
                 [System.Threading.Monitor]::Enter($QueueLock)
@@ -655,7 +739,7 @@ function Initialize-StartupFileProcessing {
                 }
             }
         } else {
-            Write-Log -Message "No existing .m4a files found at startup." -Level "INFO"
+            Write-Log -Message "No existing audio files found at startup." -Level "INFO"
         }
     } catch {
         Write-Log -Message "Error during startup file processing: $($_.Exception.Message)" -Level "ERROR"
@@ -749,18 +833,14 @@ function Start-ServiceController {
         }
         
         # 4. Startup File Scan
-        Write-Log -Message "[ServiceController] Scanning for existing files at startup..." -Level "INFO"
+        Write-Log -Message "[ServiceController] Scanning for existing audio files at startup..." -Level "INFO"
         Initialize-StartupFileProcessing -WatchPath $WatchPath -QueueLock $global:QueueLock -Queue $global:Queue
         
         # 5. Start FileSystemWatcher
         Write-Log -Message "[ServiceController] Starting FileSystemWatcher..." -Level "INFO"
         Start-FileSystemWatcher -Path $WatchPath
         
-        # 6. Start Queue Processor
-        Write-Log -Message "[ServiceController] Starting Queue Processor..." -Level "INFO"
-        Start-QueueProcessor
-        
-        # 7. Start Health Monitor
+        # 6. Start Health Monitor
         Write-Log -Message "[ServiceController] Starting Health Monitor..." -Level "INFO"
         Start-HealthMonitor -IntervalSeconds 60
         
@@ -778,4 +858,38 @@ function Start-ServiceController {
 # =============================
 # Start the Service
 # =============================
-Start-ServiceController 
+try {
+    Start-ServiceController
+    
+    # Main service loop - keep the service running
+    Write-Log -Message "Service started successfully. Entering main loop..." -Level "INFO"
+    
+    while ($true) {
+        # Check if any critical components have failed
+        if ($global:FileSystemWatcher -and -not $global:FileSystemWatcher.EnableRaisingEvents) {
+            Write-Log -Message "FileSystemWatcher stopped, restarting..." -Level "WARN"
+            Start-FileSystemWatcher -Path $WatchPath
+        }
+        
+        # Process any audio files in the watch directory
+        try {
+            $audioExtensions = @("*.m4a", "*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg", "*.wma", "*.m4b", "*.webm")
+            $files = @()
+            foreach ($ext in $audioExtensions) {
+                $files += Get-ChildItem -Path $WatchPath -Filter $ext -ErrorAction SilentlyContinue
+            }
+            foreach ($file in $files) {
+                Write-Log -Message "Processing file: $($file.FullName)" -Level "INFO"
+                Process-AudioFile -FilePath $file.FullName
+            }
+        } catch {
+            Write-Log -Message "Error processing files: $($_.Exception.Message)" -Level "ERROR"
+        }
+        
+        # Sleep for a short interval to prevent high CPU usage
+        Start-Sleep -Seconds 30
+    }
+} catch {
+    Write-Log -Message "Critical error in service: $($_.Exception.Message)" -Level "ERROR"
+    throw
+} 
