@@ -71,7 +71,7 @@ if ($RemoveDirs) {
                     Remove-Item $dir -Recurse -Force
                     Write-Host "Removed directory: $dir" -ForegroundColor Green
                 } catch {
-                    Write-Host "Failed to remove directory $dir: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "Failed to remove directory $dir`: $($_.Exception.Message)" -ForegroundColor Red
                 }
             } else {
                 Write-Host "Skipped removal of $label ($dir)." -ForegroundColor Cyan

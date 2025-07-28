@@ -160,33 +160,13 @@ function Process-AudioFile {
         return
     }
     
-    # Build arguments array with proper escaping for file paths with spaces
-    $whisperArgs = @(
-        "--model", "medium",
-        "--language", $Language,
-        "--output_format", "txt",
-        "--output_dir", $OutputPath,
-        $FilePath
-    )
-    
     try {
-        Write-Log -Message "Running whisper command: $($whisperCmd.Source) $($whisperArgs -join ' ')" -Level "INFO"
-        
-        # Build arguments array with proper escaping
-        $whisperArgs = @(
-            "--model", "medium",
-            "--language", $Language,
-            "--output_format", "txt",
-            "--output_dir", $OutputPath,
-            $FilePath
-        )
-        
-        # Build command string with proper escaping
+        # Build whisper command as a single string with proper escaping for paths with spaces
         $whisperCommand = "$($whisperCmd.Source) --model medium --language $Language --output_format txt --output_dir `"$OutputPath`" `"$FilePath`""
         
         Write-Log -Message "Running whisper command: $whisperCommand" -Level "INFO"
         
-        # Start process using cmd to handle spaces properly
+        # Execute whisper command using cmd.exe to handle spaces properly
         $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $whisperCommand -PassThru -NoNewWindow -RedirectStandardOutput "$OutputPath\temp_output.txt" -RedirectStandardError "$OutputPath\temp_error.txt"
         
         # Wait for process with timeout (10 minutes)
@@ -205,6 +185,31 @@ function Process-AudioFile {
         
         if ($process.ExitCode -eq 0) {
             Write-Log -Message "Successfully processed: $FilePath" -Level "INFO"
+            
+            # Check temp output and error files before cleanup
+            if (Test-Path "$OutputPath\temp_output.txt") {
+                $outputContent = Get-Content "$OutputPath\temp_output.txt" -ErrorAction SilentlyContinue
+                Write-Log -Message "Whisper output: $($outputContent -join ' ')" -Level "INFO"
+            }
+            if (Test-Path "$OutputPath\temp_error.txt") {
+                $errorContent = Get-Content "$OutputPath\temp_error.txt" -ErrorAction SilentlyContinue
+                Write-Log -Message "Whisper errors: $($errorContent -join ' ')" -Level "INFO"
+            }
+            
+            # Check if transcript file was actually created
+            $expectedTranscriptFile = Join-Path $OutputPath "$baseName.txt"
+            if (Test-Path $expectedTranscriptFile) {
+                Write-Log -Message "Transcript file created: $expectedTranscriptFile" -Level "INFO"
+            } else {
+                Write-Log -Message "WARNING: Expected transcript file not found: $expectedTranscriptFile" -Level "WARN"
+                # Check what files were actually created in the output directory
+                $createdFiles = Get-ChildItem -Path $OutputPath -Filter "*.txt" | Where-Object {$_.LastWriteTime -gt (Get-Date).AddMinutes(-5)}
+                if ($createdFiles) {
+                    Write-Log -Message "Recently created files in output directory: $($createdFiles.Name -join ', ')" -Level "INFO"
+                } else {
+                    Write-Log -Message "No recent transcript files found in output directory" -Level "WARN"
+                }
+            }
             
             # Move processed file to completed directory
             Move-Item -Path $FilePath -Destination (Join-Path $CompletedPath ([System.IO.Path]::GetFileName($FilePath))) -Force
