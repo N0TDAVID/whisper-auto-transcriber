@@ -161,13 +161,19 @@ function Process-AudioFile {
     }
     
     try {
-        # Build whisper command as a single string with proper escaping for paths with spaces
-        $whisperCommand = "$($whisperCmd.Source) --model medium --language $Language --output_format txt --output_dir `"$OutputPath`" `"$FilePath`""
+        # Build whisper command arguments as an array for proper handling
+        $whisperArgs = @(
+            "--model", "medium",
+            "--language", $Language,
+            "--output_format", "txt",
+            "--output_dir", $OutputPath,
+            $FilePath
+        )
         
-        Write-Log -Message "Running whisper command: $whisperCommand" -Level "INFO"
+        Write-Log -Message "Running whisper command: $($whisperCmd.Source) $($whisperArgs -join ' ')" -Level "INFO"
         
-        # Execute whisper command using cmd.exe to handle spaces properly
-        $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $whisperCommand -PassThru -NoNewWindow -RedirectStandardOutput "$OutputPath\temp_output.txt" -RedirectStandardError "$OutputPath\temp_error.txt"
+        # Execute whisper command directly using PowerShell
+        $process = Start-Process -FilePath $whisperCmd.Source -ArgumentList $whisperArgs -PassThru -NoNewWindow -RedirectStandardOutput "$OutputPath\temp_output.txt" -RedirectStandardError "$OutputPath\temp_error.txt"
         
         # Wait for process with timeout (10 minutes)
         $timeout = 600
