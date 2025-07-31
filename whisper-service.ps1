@@ -161,13 +161,17 @@ function Process-AudioFile {
     }
     
     try {
-        # Build whisper command arguments as an array for proper handling
+        # Build whisper command arguments with quoted filename
+        $fileName = [System.IO.Path]::GetFileName($FilePath)
+        $directory = [System.IO.Path]::GetDirectoryName($FilePath)
+        $quotedFilePath = Join-Path $directory "`"$fileName`""
+        
         $whisperArgs = @(
             "--model", "medium",
             "--language", $Language,
             "--output_format", "txt",
             "--output_dir", $OutputPath,
-            $FilePath
+            $quotedFilePath
         )
         
         Write-Log -Message "Running whisper command: $($whisperCmd.Source) $($whisperArgs -join ' ')" -Level "INFO"
@@ -343,4 +347,4 @@ try {
 } catch {
     Write-Log -Message "Critical error in service: $($_.Exception.Message)" -Level "ERROR"
     throw
-} 
+}
