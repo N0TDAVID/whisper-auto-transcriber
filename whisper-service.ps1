@@ -153,84 +153,81 @@ function Process-AudioFile {
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
     Write-Log -Message "Starting transcription for: $FilePath" -Level "INFO"
     
-    # Check if whisper CLI is available
+    # Check if whisper CLI is available - use full path as fallback
     $whisperCmd = Get-Command whisper -ErrorAction SilentlyContinue
     if (-not $whisperCmd) {
-        Write-Log -Message "Whisper CLI executable not found in PATH. Please install or add to PATH." -Level "ERROR"
-        return
+        # Try the known installation path
+        $whisperPath = "C:\Users\Daniel\AppData\Local\Programs\Python\Python310\Scripts\whisper.exe"
+        if (Test-Path $whisperPath) {
+            $whisperCmd = @{ Source = $whisperPath }
+            Write-Log -Message "Using whisper from full path: $whisperPath" -Level "INFO"
+        } else {
+            Write-Log -Message "Whisper CLI executable not found in PATH or at expected location: $whisperPath" -Level "ERROR"
+            return
+        }
     }
     
     try {
-        # Build whisper command arguments with quoted filename
-        $fileName = [System.IO.Path]::GetFileName($FilePath)
-        $directory = [System.IO.Path]::GetDirectoryName($FilePath)
-        $quotedFilePath = Join-Path $directory "`"$fileName`""
-        
+        # Build whisper command arguments as an array for proper handling
         $whisperArgs = @(
             "--model", "medium",
             "--language", $Language,
             "--output_format", "txt",
             "--output_dir", $OutputPath,
-            $quotedFilePath
+            $FilePath
         )
         
         Write-Log -Message "Running whisper command: $($whisperCmd.Source) $($whisperArgs -join ' ')" -Level "INFO"
         
-        # Execute whisper command directly using PowerShell
-        $process = Start-Process -FilePath $whisperCmd.Source -ArgumentList $whisperArgs -PassThru -NoNewWindow -RedirectStandardOutput "$OutputPath\temp_output.txt" -RedirectStandardError "$OutputPath\temp_error.txt"
+        # Execute whisper command directly with proper exit code handling
+        $process = Start-Process -FilePath $whisperCmd.Source -ArgumentList $whisperArgs -PassThru -NoNewWindow -RedirectStandardOutput "$OutputPath\temp_output.txt" -RedirectStandardError "$OutputPath\temp_error.txt" -Wait
         
-        # Wait for process with timeout (10 minutes)
-        $timeout = 600
-        $waited = 0
-        while (-not $process.HasExited -and $waited -lt $timeout) {
-            Start-Sleep -Seconds 2
-            $waited += 2
-        }
+        Write-Log -Message "Whisper process completed with exit code: $($process.ExitCode)" -Level "INFO"
         
-        if (-not $process.HasExited) {
-            $process.Kill()
-            Write-Log -Message "Whisper process timed out after $timeout seconds for $FilePath" -Level "ERROR"
-            throw "Process timeout"
-        }
-        
-        if ($process.ExitCode -eq 0) {
-            Write-Log -Message "Successfully processed: $FilePath" -Level "INFO"
-            
-            # Check temp output and error files before cleanup
-            if (Test-Path "$OutputPath\temp_output.txt") {
-                $outputContent = Get-Content "$OutputPath\temp_output.txt" -ErrorAction SilentlyContinue
+        # Check temp output and error files before evaluation
+        $outputContent = ""
+        $errorContent = ""
+        if (Test-Path "$OutputPath\temp_output.txt") {
+            $outputContent = Get-Content "$OutputPath\temp_output.txt" -ErrorAction SilentlyContinue
+            if ($outputContent) {
                 Write-Log -Message "Whisper output: $($outputContent -join ' ')" -Level "INFO"
             }
-            if (Test-Path "$OutputPath\temp_error.txt") {
-                $errorContent = Get-Content "$OutputPath\temp_error.txt" -ErrorAction SilentlyContinue
-                Write-Log -Message "Whisper errors: $($errorContent -join ' ')" -Level "INFO"
+        }
+        if (Test-Path "$OutputPath\temp_error.txt") {
+            $errorContent = Get-Content "$OutputPath\temp_error.txt" -ErrorAction SilentlyContinue
+            if ($errorContent) {
+                Write-Log -Message "Whisper stderr: $($errorContent -join ' ')" -Level "INFO"
             }
-            
-            # Check if transcript file was actually created
-            $expectedTranscriptFile = Join-Path $OutputPath "$baseName.txt"
-            if (Test-Path $expectedTranscriptFile) {
-                Write-Log -Message "Transcript file created: $expectedTranscriptFile" -Level "INFO"
-            } else {
-                Write-Log -Message "WARNING: Expected transcript file not found: $expectedTranscriptFile" -Level "WARN"
-                # Check what files were actually created in the output directory
-                $createdFiles = Get-ChildItem -Path $OutputPath -Filter "*.txt" | Where-Object {$_.LastWriteTime -gt (Get-Date).AddMinutes(-5)}
-                if ($createdFiles) {
-                    Write-Log -Message "Recently created files in output directory: $($createdFiles.Name -join ', ')" -Level "INFO"
-                } else {
-                    Write-Log -Message "No recent transcript files found in output directory" -Level "WARN"
-                }
-            }
+        }
+        
+        # Check if transcript file was actually created (this is the real success indicator)
+        $expectedTranscriptFile = Join-Path $OutputPath "$baseName.txt"
+        $transcriptCreated = Test-Path $expectedTranscriptFile
+        
+        if ($transcriptCreated) {
+            Write-Log -Message "Successfully processed: $FilePath" -Level "INFO"
+            Write-Log -Message "Transcript file created: $expectedTranscriptFile" -Level "INFO"
             
             # Move processed file to completed directory
-            Move-Item -Path $FilePath -Destination (Join-Path $CompletedPath ([System.IO.Path]::GetFileName($FilePath))) -Force
-            Write-Log -Message "Moved to completed: $FilePath" -Level "INFO"
+            $destPath = Get-UniqueFileName -Directory $CompletedPath -BaseName $baseName -Extension $fileExt
+            Move-Item -Path $FilePath -Destination $destPath -Force
+            Write-Log -Message "Moved to completed: $destPath" -Level "INFO"
         } else {
-            $errorOutput = Get-Content "$OutputPath\temp_error.txt" -ErrorAction SilentlyContinue
-            Write-Log -Message "Whisper CLI failed for ${FilePath} with exit code: $($process.ExitCode). Error: $errorOutput" -Level "ERROR"
+            Write-Log -Message "Whisper completed but no transcript file found for ${FilePath}. Exit code: $($process.ExitCode)" -Level "ERROR"
+            if ($errorContent) {
+                Write-Log -Message "Error details: $($errorContent -join ' ')" -Level "ERROR"
+            }
+            
+            # Check what files were actually created in the output directory
+            $createdFiles = Get-ChildItem -Path $OutputPath -Filter "*.txt" | Where-Object {$_.LastWriteTime -gt (Get-Date).AddMinutes(-5)}
+            if ($createdFiles) {
+                Write-Log -Message "Recently created files in output directory: $($createdFiles.Name -join ', ')" -Level "INFO"
+            }
             
             # Move failed file to failed directory
-            Move-Item -Path $FilePath -Destination (Join-Path $FailedPath ([System.IO.Path]::GetFileName($FilePath))) -Force
-            Write-Log -Message "Moved to failed: $FilePath" -Level "ERROR"
+            $destPath = Get-UniqueFileName -Directory $FailedPath -BaseName $baseName -Extension $fileExt
+            Move-Item -Path $FilePath -Destination $destPath -Force
+            Write-Log -Message "Moved to failed: $destPath" -Level "ERROR"
         }
         
         # Clean up temp files
@@ -241,8 +238,9 @@ function Process-AudioFile {
         Write-Log -Message "Exception in Process-AudioFile for ${FilePath}: $($_.Exception.Message)" -Level "ERROR"
         
         # Move failed file to failed directory
-        Move-Item -Path $FilePath -Destination (Join-Path $FailedPath ([System.IO.Path]::GetFileName($FilePath))) -Force
-        Write-Log -Message "Moved to failed: $FilePath" -Level "ERROR"
+        $destPath = Get-UniqueFileName -Directory $FailedPath -BaseName $baseName -Extension $fileExt
+        Move-Item -Path $FilePath -Destination $destPath -Force
+        Write-Log -Message "Moved to failed: $destPath" -Level "ERROR"
     }
 }
 
@@ -347,4 +345,4 @@ try {
 } catch {
     Write-Log -Message "Critical error in service: $($_.Exception.Message)" -Level "ERROR"
     throw
-}
+} 
