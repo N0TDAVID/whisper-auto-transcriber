@@ -1,5 +1,5 @@
 # whisper-service.ps1
-# Whisper Auto-Transcriber Windows Service
+# WhisperX Auto-Transcriber Windows Service
 # 
 # Supported Audio Formats:
 # - M4A (AAC)
@@ -127,6 +127,41 @@ function Get-UniqueFileName {
     return $filePath
 }
 
+function Get-PythonExecutablePath {
+    try {
+        $pythonPath = python -c "import sys; print(sys.executable)" 2>$null
+        if ($pythonPath) {
+            return $pythonPath.Trim()
+        }
+    } catch { }
+    return $null
+}
+
+function Get-WhisperXExecutablePath {
+    try {
+        $pythonPath = Get-PythonExecutablePath
+        if ($pythonPath) {
+            $pythonDir = Split-Path $pythonPath
+            $scriptsDir = Join-Path $pythonDir "Scripts"
+            $whisperxPath = Join-Path $scriptsDir "whisperx.exe"
+            if (Test-Path $whisperxPath) {
+                return $whisperxPath
+            }
+        }
+    } catch { }
+    return $null
+}
+
+function Get-PythonSitePackagesPath {
+    try {
+        $pythonSitePackages = python -c "import site; print(site.getsitepackages()[1])" 2>$null
+        if ($pythonSitePackages) {
+            return $pythonSitePackages.Trim()
+        }
+    } catch { }
+    return $null
+}
+
 # =============================
 # File Processing Functions
 # =============================
@@ -153,36 +188,62 @@ function Process-AudioFile {
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
     Write-Log -Message "Starting transcription for: $FilePath" -Level "INFO"
     
-    # Check if whisper CLI is available - use full path as fallback
-    $whisperCmd = Get-Command whisper -ErrorAction SilentlyContinue
-    if (-not $whisperCmd) {
-        # Try the known installation path
-        $whisperPath = "C:\Users\Daniel\AppData\Local\Programs\Python\Python310\Scripts\whisper.exe"
-        if (Test-Path $whisperPath) {
-            $whisperCmd = @{ Source = $whisperPath }
-            Write-Log -Message "Using whisper from full path: $whisperPath" -Level "INFO"
+    # Check if whisperx CLI is available - use full path as fallback
+    $whisperxCmd = Get-Command whisperx -ErrorAction SilentlyContinue
+    if (-not $whisperxCmd) {
+        # Try to find whisperx dynamically
+        $whisperxPath = Get-WhisperXExecutablePath
+        if ($whisperxPath -and (Test-Path $whisperxPath)) {
+            $whisperxCmd = @{ Source = $whisperxPath }
+            Write-Log -Message "Using whisperx from full path: $whisperxPath" -Level "INFO"
         } else {
-            Write-Log -Message "Whisper CLI executable not found in PATH or at expected location: $whisperPath" -Level "ERROR"
+            Write-Log -Message "WhisperX CLI executable not found in PATH or at expected location. Please ensure WhisperX is installed." -Level "ERROR"
             return
         }
     }
     
     try {
-        # Build whisper command arguments as an array for proper handling
-        $whisperArgs = @(
+        # Add cuDNN and CUDA DLL paths to environment for this process
+        $pythonSitePackages = Get-PythonSitePackagesPath
+        if ($pythonSitePackages) {
+            $cudnnPath = Join-Path $pythonSitePackages "nvidia\cudnn\bin"
+            $cublasPath = Join-Path $pythonSitePackages "nvidia\cublas\bin"
+            $nvrtcPath = Join-Path $pythonSitePackages "nvidia\cuda_nvrtc\bin"
+            
+            # Only add paths that exist
+            $pathsToAdd = @()
+            if (Test-Path $cudnnPath) { $pathsToAdd += $cudnnPath }
+            if (Test-Path $cublasPath) { $pathsToAdd += $cublasPath }
+            if (Test-Path $nvrtcPath) { $pathsToAdd += $nvrtcPath }
+            
+            if ($pathsToAdd.Count -gt 0) {
+                $env:PATH = ($pathsToAdd -join ";") + ";" + $env:PATH
+                Write-Log -Message "Added CUDA library paths to environment" -Level "INFO"
+            } else {
+                Write-Log -Message "CUDA library paths not found, continuing without explicit path addition" -Level "WARN"
+            }
+        } else {
+            Write-Log -Message "Could not determine Python site-packages path, continuing without explicit CUDA path addition" -Level "WARN"
+        }
+        
+        # Build whisperx command arguments as an array for proper handling
+        $quotedFilePath = "`"$FilePath`""
+        $whisperxArgs = @(
             "--model", "medium",
             "--language", $Language,
             "--output_format", "txt",
             "--output_dir", $OutputPath,
-            $FilePath
+            "--device", "cuda",
+            "--compute_type", "float16",
+            $quotedFilePath
         )
         
-        Write-Log -Message "Running whisper command: $($whisperCmd.Source) $($whisperArgs -join ' ')" -Level "INFO"
+        Write-Log -Message "Running whisperx command: $($whisperxCmd.Source) $($whisperxArgs -join ' ')" -Level "INFO"
         
-        # Execute whisper command directly with proper exit code handling
-        $process = Start-Process -FilePath $whisperCmd.Source -ArgumentList $whisperArgs -PassThru -NoNewWindow -RedirectStandardOutput "$OutputPath\temp_output.txt" -RedirectStandardError "$OutputPath\temp_error.txt" -Wait
+        # Execute whisperx command directly with proper exit code handling
+        $process = Start-Process -FilePath $whisperxCmd.Source -ArgumentList $whisperxArgs -PassThru -NoNewWindow -RedirectStandardOutput "$OutputPath\temp_output.txt" -RedirectStandardError "$OutputPath\temp_error.txt" -Wait
         
-        Write-Log -Message "Whisper process completed with exit code: $($process.ExitCode)" -Level "INFO"
+        Write-Log -Message "WhisperX process completed with exit code: $($process.ExitCode)" -Level "INFO"
         
         # Check temp output and error files before evaluation
         $outputContent = ""
@@ -190,13 +251,13 @@ function Process-AudioFile {
         if (Test-Path "$OutputPath\temp_output.txt") {
             $outputContent = Get-Content "$OutputPath\temp_output.txt" -ErrorAction SilentlyContinue
             if ($outputContent) {
-                Write-Log -Message "Whisper output: $($outputContent -join ' ')" -Level "INFO"
+                Write-Log -Message "WhisperX output: $($outputContent -join ' ')" -Level "INFO"
             }
         }
         if (Test-Path "$OutputPath\temp_error.txt") {
             $errorContent = Get-Content "$OutputPath\temp_error.txt" -ErrorAction SilentlyContinue
             if ($errorContent) {
-                Write-Log -Message "Whisper stderr: $($errorContent -join ' ')" -Level "INFO"
+                Write-Log -Message "WhisperX stderr: $($errorContent -join ' ')" -Level "INFO"
             }
         }
         
@@ -213,7 +274,7 @@ function Process-AudioFile {
             Move-Item -Path $FilePath -Destination $destPath -Force
             Write-Log -Message "Moved to completed: $destPath" -Level "INFO"
         } else {
-            Write-Log -Message "Whisper completed but no transcript file found for ${FilePath}. Exit code: $($process.ExitCode)" -Level "ERROR"
+            Write-Log -Message "WhisperX completed but no transcript file found for ${FilePath}. Exit code: $($process.ExitCode)" -Level "ERROR"
             if ($errorContent) {
                 Write-Log -Message "Error details: $($errorContent -join ' ')" -Level "ERROR"
             }
@@ -307,7 +368,7 @@ $null = Register-EngineEvent PowerShell.Exiting -Action { Stop-ServiceGracefully
 # Start the Service
 # =============================
 try {
-    Write-Log -Message "Starting Whisper Service..." -Level "INFO"
+    Write-Log -Message "Starting WhisperX Service..." -Level "INFO"
     
     # Start FileSystemWatcher
     Start-FileSystemWatcher -Path $WatchPath
